@@ -1,0 +1,19 @@
+[package]
+name = "cordtap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+audiopus = "0.2.0"
+byte-slice-cast = "1.2.2"
+dashmap = "5.5.3"
+gstreamer = "0.21.3"
+gstreamer-app = "0.21.2"
+gstreamer-audio = "0.21.3"
+serde = { version = "1.0.196", features = ["derive"] }
+serde_json = "1.0.113"
+serenity = "0.12"
+songbird = { version = "0.4.0", default-features = true, features = [
+    "receive",
+] }
+tokio = { version = "1.21.2", features = ["macros", "rt-multi-thread"] }
