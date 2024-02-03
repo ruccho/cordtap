@@ -12,15 +12,12 @@ use gst::{Pipeline, State};
 
 use gst_app::AppSrc;
 use gst_audio::AudioInfo;
+
 use serde::{Deserialize, Serialize};
-use serenity::all::{ChannelId, Ready};
+
+use serenity::all::Ready;
 use serenity::async_trait;
-use serenity::framework::standard::macros::{command, group};
-use serenity::framework::standard::Args;
-use serenity::framework::standard::{CommandResult, Configuration, StandardFramework};
-use serenity::model::channel::Message;
 use serenity::prelude::*;
-use serenity::Result as SerenityResult;
 
 use songbird::driver::DecodeMode;
 use songbird::events::context_data::DisconnectData;
@@ -42,10 +39,6 @@ struct Config {
 
 static GLOBAL_CONFIG: std::sync::Mutex<Option<Config>> = std::sync::Mutex::new(Option::None);
 
-#[group]
-#[commands(join, leave, ping)]
-struct General;
-
 struct Handler;
 
 #[derive(Clone)]
@@ -66,6 +59,10 @@ struct InnerReceiver {
     pipeline: Pipeline,
     appsrc: AppSrc,
 }
+struct PoiseData {}
+
+type PoiseError = Box<dyn std::error::Error + Send + Sync>;
+type PoiseContext<'a> = poise::Context<'a, PoiseData, PoiseError>;
 
 impl Receiver {
     pub fn new(url: &str) -> Self {
@@ -209,7 +206,6 @@ impl VoiceEventHandler for Receiver {
                     let buffer = buffer.get_mut().unwrap();
                     let mut samples = buffer.map_writable().unwrap();
                     let samples = samples.as_mut_slice_of::<i16>().unwrap();
-
                     for i in &mut samples[..] {
                         *i = 0
                     }
@@ -296,9 +292,6 @@ impl VoiceEventHandler for Receiver {
 async fn main() {
     gst::init().unwrap();
 
-    let framework = StandardFramework::new().group(&GENERAL_GROUP);
-    framework.configure(Configuration::new().prefix("~")); // set the bot's prefix to "~"
-
     let token = {
         let config_raw = fs::read_to_string("config.json").expect("JSON Read Failed.");
         let config: Config = serde_json::from_str(&config_raw).unwrap();
@@ -308,12 +301,34 @@ async fn main() {
         token
     };
 
-    let intents: GatewayIntents = GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT;
+    let intents: GatewayIntents =
+        GatewayIntents::non_privileged() | GatewayIntents::MESSAGE_CONTENT;
 
     let songbird_config = songbird::Config::default().decode_mode(DecodeMode::Decode);
 
+    let options = poise::FrameworkOptions {
+        commands: vec![join(), leave()],
+        ..Default::default()
+    };
+
+    let framework = poise::Framework::builder()
+        .options(options)
+        .setup(move |ctx, _ready, framework| {
+            Box::pin(async move {
+                println!("Logged in as {}", _ready.user.name);
+
+                let commands =
+                    poise::builtins::create_application_commands(&framework.options().commands);
+
+                serenity::model::application::Command::set_global_commands(ctx, commands).await?;
+
+                Ok(PoiseData {})
+            })
+        })
+        .build();
+
     let mut client = Client::builder(token, intents)
-        .event_handler(Handler)
+        //.event_handler(Handler)
         .framework(framework)
         .register_songbird_from_config(songbird_config)
         .await
@@ -325,33 +340,64 @@ async fn main() {
     }
 }
 
-#[command]
-#[only_in(guilds)]
-async fn join(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
-    let Ok(connect_to) = args.single::<ChannelId>() else {
-        check_msg(
-            msg.reply(ctx, "Requires a valid voice channel ID be given")
-                .await,
-        );
+#[poise::command(slash_command)]
+async fn join(ctx: PoiseContext<'_>) -> Result<(), PoiseError> {
+    let (guild_id, connect_to) = {
+        let user_id = ctx.author().id;
 
+        let (guild_id, voice_state) = {
+            let Some(guild) = ctx.guild() else {
+                ctx.reply("❌ Failed to guild.").await?;
+                return Ok(());
+            };
+
+            let voice_channel = guild.voice_states.get(&user_id).cloned();
+
+            let guild_id = (&(guild.id)).clone();
+            (guild_id, voice_channel)
+        };
+
+        let Some(voice_state) = voice_state else {
+            ctx.reply("❌ Failed to get your voice state.").await?;
+            return Ok(());
+        };
+
+        let Some(connect_to) = voice_state.channel_id else {
+            ctx.reply("❌ Failed to get your voice channel.").await?;
+            return Ok(());
+        };
+        (guild_id, connect_to)
+    };
+
+    let rtmp_url = {
+        let config = {
+            if let Ok(config_box) = GLOBAL_CONFIG.lock() {
+                if let Some(config) = config_box.as_ref() {
+                    Some(config.rtmp_url.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        let Some(rtmp_url) = config else {
+            ctx.reply("❌ Initialization failed. (config load)")
+                .await?;
+            return Ok(());
+        };
+        rtmp_url
+    };
+
+    let Some(manager) = songbird::get(ctx.serenity_context()).await else {
+        ctx.reply("❌ Initialization failed. (retrieving songbird client)").await?;
         return Ok(());
     };
 
-    let guild_id = msg.guild_id.unwrap();
-
-    let manager = songbird::get(ctx)
-        .await
-        .expect("Songbird Voice client placed in at initialisation.")
-        .clone();
+    let manager = manager.clone();
 
     if let Ok(handler_lock) = manager.join(guild_id, connect_to).await {
-        // NOTE: this skips listening for the actual connection result.
         let mut handler = handler_lock.lock().await;
-
-        let rtmp_url = {
-            let config_box = GLOBAL_CONFIG.lock().unwrap();
-            config_box.as_ref().unwrap().rtmp_url.clone()
-        };
 
         let evt_receiver = Receiver::new(rtmp_url.as_str());
 
@@ -362,60 +408,35 @@ async fn join(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
         handler.add_global_event(CoreEvent::DriverDisconnect.into(), evt_receiver.clone());
         handler.add_global_event(CoreEvent::VoiceTick.into(), evt_receiver);
 
-        check_msg(
-            msg.channel_id
-                .say(&ctx.http, &format!("Joined {}", connect_to.mention()))
-                .await,
-        );
+        ctx.reply("🔴 Your voice is now ON AIR!").await?;
     } else {
-        check_msg(
-            msg.channel_id
-                .say(&ctx.http, "Error joining the channel")
-                .await,
-        );
+        ctx.reply("❌ Failed to join the voice channel.").await?;
+        return Ok(());
     }
 
     Ok(())
 }
 
-#[command]
-#[only_in(guilds)]
-async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild_id = msg.guild_id.unwrap();
+#[poise::command(slash_command)]
+async fn leave(ctx: PoiseContext<'_>) -> Result<(), PoiseError> {
+    let guild_id = {
+        let Some(guild) = ctx.guild() else {
+            ctx.reply("❌ Failed to guild.").await?;
+            return Ok(());
+        };
 
-    let manager = songbird::get(ctx)
-        .await
-        .expect("Songbird Voice client placed in at initialisation.")
-        .clone();
-    let has_handler = manager.get(guild_id).is_some();
+        guild.id
+    };
+    let Some(manager) = songbird::get(ctx.serenity_context()).await else {
+        ctx.reply("❌ Cordtap is not in a voice channel.").await?;
+        return Ok(());
+    };
 
-    if has_handler {
-        if let Err(e) = manager.remove(guild_id).await {
-            check_msg(
-                msg.channel_id
-                    .say(&ctx.http, format!("Failed: {:?}", e))
-                    .await,
-            );
-        }
+    if let Err(e) = manager.remove(guild_id).await {
+        ctx.reply(format!("❌ Error: {:?}", e)).await?;
+    };
 
-        check_msg(msg.channel_id.say(&ctx.http, "Left voice channel").await);
-    } else {
-        check_msg(msg.reply(ctx, "Not in a voice channel").await);
-    }
+    ctx.reply("✅ Left.").await?;
 
     Ok(())
-}
-
-#[command]
-async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
-    msg.reply(ctx, "Pong!").await?;
-
-    Ok(())
-}
-
-/// Checks that a message successfully sent; if not, then logs why to stdout.
-fn check_msg(result: SerenityResult<Message>) {
-    if let Err(why) = result {
-        println!("Error sending message: {:?}", why);
-    }
 }
