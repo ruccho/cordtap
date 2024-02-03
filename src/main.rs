@@ -13,9 +13,10 @@ use gst::{Pipeline, State};
 use gst_app::AppSrc;
 use gst_audio::AudioInfo;
 
+use poise::serenity_prelude as serenity;
+
 use serde::{Deserialize, Serialize};
 
-use serenity::all::Ready;
 use serenity::async_trait;
 use serenity::prelude::*;
 
@@ -33,23 +34,13 @@ extern crate gstreamer_audio as gst_audio;
 #[derive(Serialize, Deserialize, Debug)]
 struct Config {
     discord_token: String,
-    rtmp_url: String,
 }
 
 static GLOBAL_CONFIG: std::sync::Mutex<Option<Config>> = std::sync::Mutex::new(Option::None);
 
-struct Handler;
-
 #[derive(Clone)]
 struct Receiver {
     inner: Arc<InnerReceiver>,
-}
-
-#[async_trait]
-impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
-        println!("{} is connected!", ready.user.name);
-    }
 }
 
 struct InnerReceiver {
@@ -60,10 +51,23 @@ struct InnerReceiver {
 }
 
 impl Drop for InnerReceiver {
-    fn drop(&mut self)
-    {
+    fn drop(&mut self) {
         println!("receiver resources dropped!");
     }
+}
+
+#[derive(Debug, poise::Modal)]
+#[name = "Start Streaming"]
+struct JoinModal {
+    #[name = "RTMP URL"]
+    rtmp_url: String,
+}
+
+#[derive(Debug, poise::Modal)]
+#[name = "Start Streaming with YouTube"]
+struct JoinYouTubeModal {
+    #[name = "Stream Key"]
+    stream_key: String,
 }
 
 struct PoiseData {}
@@ -305,92 +309,156 @@ async fn main() {
         .build();
 
     let mut client = Client::builder(token, intents)
-        //.event_handler(Handler)
         .framework(framework)
         .register_songbird_from_config(songbird_config)
         .await
         .expect("Error creating client");
 
-    // start listening for events by starting a single shard
     if let Err(why) = client.start().await {
         println!("An error occurred while running the client: {:?}", why);
     }
 }
-
 #[poise::command(slash_command)]
-async fn join(ctx: PoiseContext<'_>) -> Result<(), PoiseError> {
-    let (guild_id, connect_to) = {
-        let user_id = ctx.author().id;
+async fn join(ctx: poise::ApplicationContext<'_, PoiseData, PoiseError>) -> Result<(), PoiseError> {
+    let reply = {
+        let components = vec![serenity::CreateActionRow::Buttons(vec![
+            serenity::CreateButton::new("open_modal_youtube")
+                .label("YouTube...")
+                .style(poise::serenity_prelude::ButtonStyle::Success),
+            serenity::CreateButton::new("open_modal_rtmp")
+                .label("Custom RTMP URL...")
+                .style(poise::serenity_prelude::ButtonStyle::Success),
+        ])];
 
-        let (guild_id, voice_state) = {
-            let Some(guild) = ctx.guild() else {
-                ctx.reply("❌ Failed to find the guild.").await?;
+        poise::CreateReply::default()
+            .content("")
+            .components(components)
+    };
+
+    let reply_handle = ctx.send(reply).await?;
+
+    while let Some(mci) = serenity::ComponentInteractionCollector::new(ctx.serenity_context())
+        .timeout(std::time::Duration::from_secs(120))
+        .await
+    {
+        let id: &str = mci.data.custom_id.as_ref();
+        let rtmp_url = if id == "open_modal_youtube" {
+            let data = poise::execute_modal_on_component_interaction::<JoinYouTubeModal>(
+                ctx, mci, None, None,
+            )
+            .await?;
+
+            match data {
+                None => continue,
+                Some(data) => "rtmp://a.rtmp.youtube.com/live2/".to_string() + &data.stream_key,
+            }
+        } else if id == "open_modal_rtmp" {
+            let data =
+                poise::execute_modal_on_component_interaction::<JoinModal>(ctx, mci, None, None)
+                    .await?;
+
+            match data {
+                None => continue,
+                Some(data) => data.rtmp_url.clone(),
+            }
+        } else {
+            continue;
+        };
+
+        let (guild_id, connect_to) = {
+            let user_id = ctx.author().id;
+
+            let (guild_id, voice_state) = {
+                let Some(guild) = ctx.guild() else {
+                    reply_handle
+                        .edit(
+                            PoiseContext::Application(ctx),
+                            poise::CreateReply::default()
+                                .content("❌ Failed to find the guild.")
+                                .components(vec![]),
+                        )
+                        .await?;
+                    return Ok(());
+                };
+
+                let voice_channel = guild.voice_states.get(&user_id).cloned();
+
+                let guild_id = (&(guild.id)).clone();
+                (guild_id, voice_channel)
+            };
+
+            let Some(voice_state) = voice_state else {
+                reply_handle
+                    .edit(
+                        PoiseContext::Application(ctx),
+                        poise::CreateReply::default()
+                            .content("❌  Failed to get your voice state.")
+                            .components(vec![]),
+                    )
+                    .await?;
                 return Ok(());
             };
 
-            let voice_channel = guild.voice_states.get(&user_id).cloned();
-
-            let guild_id = (&(guild.id)).clone();
-            (guild_id, voice_channel)
+            let Some(connect_to) = voice_state.channel_id else {
+                reply_handle
+                    .edit(
+                        PoiseContext::Application(ctx),
+                        poise::CreateReply::default()
+                            .content("❌  Failed to get your voice channel.")
+                            .components(vec![]),
+                    )
+                    .await?;
+                return Ok(());
+            };
+            (guild_id, connect_to)
         };
 
-        let Some(voice_state) = voice_state else {
-            ctx.reply("❌ Failed to get your voice state.").await?;
+        let Some(manager) = songbird::get(ctx.serenity_context()).await else {
+            reply_handle
+                .edit(
+                    PoiseContext::Application(ctx),
+                    poise::CreateReply::default()
+                        .content("❌  Initialization failed. (retrieving songbird client)")
+                        .components(vec![]),
+                )
+                .await?;
             return Ok(());
         };
 
-        let Some(connect_to) = voice_state.channel_id else {
-            ctx.reply("❌ Failed to get your voice channel.").await?;
+        let manager = manager.clone();
+
+        if let Ok(handler_lock) = manager.join(guild_id, connect_to).await {
+            let mut handler = handler_lock.lock().await;
+
+            let evt_receiver = Receiver::new(rtmp_url.as_str());
+
+            handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), evt_receiver.clone());
+            handler.add_global_event(CoreEvent::RtpPacket.into(), evt_receiver.clone());
+            handler.add_global_event(CoreEvent::RtcpPacket.into(), evt_receiver.clone());
+            handler.add_global_event(CoreEvent::ClientDisconnect.into(), evt_receiver.clone());
+            handler.add_global_event(CoreEvent::DriverDisconnect.into(), evt_receiver.clone());
+            handler.add_global_event(CoreEvent::VoiceTick.into(), evt_receiver);
+
+            reply_handle
+                .edit(
+                    PoiseContext::Application(ctx),
+                    poise::CreateReply::default()
+                        .content("🔴 Your voice is now ON AIR!")
+                        .components(vec![]),
+                )
+                .await?;
+        } else {
+            reply_handle
+                .edit(
+                    PoiseContext::Application(ctx),
+                    poise::CreateReply::default()
+                        .content("❌ Failed to join the voice channel.")
+                        .components(vec![]),
+                )
+                .await?;
             return Ok(());
-        };
-        (guild_id, connect_to)
-    };
-
-    let rtmp_url = {
-        let config = {
-            if let Ok(config_box) = GLOBAL_CONFIG.lock() {
-                if let Some(config) = config_box.as_ref() {
-                    Some(config.rtmp_url.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        let Some(rtmp_url) = config else {
-            ctx.reply("❌ Initialization failed. (config load)").await?;
-            return Ok(());
-        };
-        rtmp_url
-    };
-
-    let Some(manager) = songbird::get(ctx.serenity_context()).await else {
-        ctx.reply("❌ Initialization failed. (retrieving songbird client)")
-            .await?;
-        return Ok(());
-    };
-
-    let manager = manager.clone();
-
-    if let Ok(handler_lock) = manager.join(guild_id, connect_to).await {
-        let mut handler = handler_lock.lock().await;
-
-        let evt_receiver = Receiver::new(rtmp_url.as_str());
-
-        handler.add_global_event(CoreEvent::SpeakingStateUpdate.into(), evt_receiver.clone());
-        handler.add_global_event(CoreEvent::RtpPacket.into(), evt_receiver.clone());
-        handler.add_global_event(CoreEvent::RtcpPacket.into(), evt_receiver.clone());
-        handler.add_global_event(CoreEvent::ClientDisconnect.into(), evt_receiver.clone());
-        handler.add_global_event(CoreEvent::DriverDisconnect.into(), evt_receiver.clone());
-        handler.add_global_event(CoreEvent::VoiceTick.into(), evt_receiver);
-
-        ctx.reply("🔴 Your voice is now ON AIR!").await?;
-    } else {
-        ctx.reply("❌ Failed to join the voice channel.").await?;
-        return Ok(());
+        }
     }
-
     Ok(())
 }
 
