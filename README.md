@@ -29,19 +29,16 @@ docker run TAG_NAME
 
 1. Invite deployed Cordtap to your server
 
-2. Post command to let Cordtap join the voice channel:
+2. Post command to let Cordtap join the voice channel you are in:
 
 ```
-~join <VOICE_CHANNEL_ID>
+/join
 ```
-
-> [!NOTE]
-> `<VOICE_CHANNEL_ID>` can be copied from context menu of the voice channel.
 
 3. Now your voice will be streamed onto RTMP server you specified in config.json
 
 4. Post command to let Cordtap leave the voice channel and stop streaming:
 
 ```
-~leave
+/leave
 ```
