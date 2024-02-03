@@ -8,8 +8,7 @@ A discord bot that bypasses voice to RTMP streaming server such as YouTube Live.
 
 ```json
 {
-    "discord_token": "<YOUR DISCORD TOKEN HERE>",
-    "rtmp_url": "<RTMP_URL>"
+    "discord_token": "<YOUR DISCORD TOKEN HERE>"
 }
 ```
 
@@ -27,15 +26,15 @@ docker run TAG_NAME
 
 ## Usage
 
-1. Invite deployed Cordtap to your server
+1. Invite deployed Cordtap to your server.
 
-2. Post command to let Cordtap join the voice channel you are in:
+2. Post the command below to let Cordtap show you menus to enter your RTMP url: 
 
 ```
 /join
 ```
 
-3. Now your voice will be streamed onto RTMP server you specified in config.json
+3. After entering RTMP url, Cordtap joins the voice channel you are in. Now your voice will be streamed! 
 
 4. Post command to let Cordtap leave the voice channel and stop streaming:
 
