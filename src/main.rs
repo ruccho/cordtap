@@ -23,7 +23,6 @@ use songbird::driver::DecodeMode;
 use songbird::events::context_data::DisconnectData;
 use songbird::model::id::UserId;
 use songbird::model::payload::{ClientDisconnect, Speaking};
-use songbird::packet::Packet;
 use songbird::EventHandler as VoiceEventHandler;
 use songbird::{CoreEvent, Event, EventContext, SerenityInit};
 
@@ -59,6 +58,14 @@ struct InnerReceiver {
     pipeline: Pipeline,
     appsrc: AppSrc,
 }
+
+impl Drop for InnerReceiver {
+    fn drop(&mut self)
+    {
+        println!("receiver resources dropped!");
+    }
+}
+
 struct PoiseData {}
 
 type PoiseError = Box<dyn std::error::Error + Send + Sync>;
@@ -211,16 +218,12 @@ impl VoiceEventHandler for Receiver {
                     }
 
                     if speaking == 0 && !last_tick_was_empty {
-                        println!("No speakers");
-
                         self.inner.last_tick_was_empty.store(true, Ordering::SeqCst);
                     }
                     if speaking != 0 {
                         self.inner
                             .last_tick_was_empty
                             .store(false, Ordering::SeqCst);
-
-                        println!("Voice tick ({speaking}/{total_participants} live):");
 
                         for (ssrc, data) in &tick.speaking {
                             let user_id_str = if let Some(id) = self.inner.known_ssrcs.get(ssrc) {
@@ -230,32 +233,11 @@ impl VoiceEventHandler for Receiver {
                             };
 
                             if let Some(decoded_voice) = data.decoded_voice.as_ref() {
-                                let voice_len = decoded_voice.len();
-                                let audio_str = format!(
-                                    "first samples from {}: {:?}",
-                                    voice_len,
-                                    &decoded_voice[..voice_len.min(5)]
-                                );
-
                                 if let Some(packet) = &data.packet {
-                                    let rtp = packet.rtp();
-                                    println!(
-                                        "\t{ssrc}/{user_id_str}: packet seq {} ts {} {:?} -- {audio_str}",
-                                        rtp.get_sequence().0,
-                                        rtp.get_timestamp().0,
-                                        rtp.get_payload_type()
-                                    );
-
                                     for i in 0..samples.len() {
                                         samples[i] += decoded_voice[i];
                                     }
-                                } else {
-                                    println!(
-                                        "\t{ssrc}/{user_id_str}: Missed packet -- {audio_str}"
-                                    );
                                 }
-                            } else {
-                                println!("\t{ssrc}/{user_id_str}: Decode disabled.");
                             }
                         }
                     }
@@ -263,16 +245,7 @@ impl VoiceEventHandler for Receiver {
 
                 self.inner.appsrc.push_buffer(buffer).unwrap();
             }
-            Ctx::RtpPacket(packet) => {
-                let rtp = packet.rtp();
-                println!(
-                    "Received voice packet from SSRC {}, sequence {}, timestamp {} -- {}B long",
-                    rtp.get_ssrc(),
-                    rtp.get_sequence().0,
-                    rtp.get_timestamp().0,
-                    rtp.payload().len()
-                );
-            }
+            Ctx::RtpPacket(packet) => {}
             Ctx::RtcpPacket(data) => {}
             Ctx::ClientDisconnect(ClientDisconnect { user_id, .. }) => {
                 println!("Client disconnected: user {:?}", user_id);
@@ -320,7 +293,11 @@ async fn main() {
                 let commands =
                     poise::builtins::create_application_commands(&framework.options().commands);
 
-                serenity::model::application::Command::set_global_commands(ctx, commands).await?;
+                if let Err(e) =
+                    serenity::model::application::Command::set_global_commands(ctx, commands).await
+                {
+                    println!("Command registration error: {}", e.to_string());
+                }
 
                 Ok(PoiseData {})
             })
@@ -347,7 +324,7 @@ async fn join(ctx: PoiseContext<'_>) -> Result<(), PoiseError> {
 
         let (guild_id, voice_state) = {
             let Some(guild) = ctx.guild() else {
-                ctx.reply("❌ Failed to guild.").await?;
+                ctx.reply("❌ Failed to find the guild.").await?;
                 return Ok(());
             };
 
@@ -382,15 +359,15 @@ async fn join(ctx: PoiseContext<'_>) -> Result<(), PoiseError> {
             }
         };
         let Some(rtmp_url) = config else {
-            ctx.reply("❌ Initialization failed. (config load)")
-                .await?;
+            ctx.reply("❌ Initialization failed. (config load)").await?;
             return Ok(());
         };
         rtmp_url
     };
 
     let Some(manager) = songbird::get(ctx.serenity_context()).await else {
-        ctx.reply("❌ Initialization failed. (retrieving songbird client)").await?;
+        ctx.reply("❌ Initialization failed. (retrieving songbird client)")
+            .await?;
         return Ok(());
     };
 
@@ -421,7 +398,7 @@ async fn join(ctx: PoiseContext<'_>) -> Result<(), PoiseError> {
 async fn leave(ctx: PoiseContext<'_>) -> Result<(), PoiseError> {
     let guild_id = {
         let Some(guild) = ctx.guild() else {
-            ctx.reply("❌ Failed to guild.").await?;
+            ctx.reply("❌ Failed to find the guild.").await?;
             return Ok(());
         };
 
