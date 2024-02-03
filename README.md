@@ -34,9 +34,15 @@ docker run TAG_NAME
 /join
 ```
 
-3. After entering RTMP url, Cordtap joins the voice channel you are in. Now your voice will be streamed! 
+![image](https://github.com/ruccho/cordtap/assets/16096562/c951d559-77c4-411b-af3c-d890d04626ed)
 
-4. Post command to let Cordtap leave the voice channel and stop streaming:
+3. Select **YouTube...** or **Custom RTMP URL...** and enter information.
+
+![image](https://github.com/ruccho/cordtap/assets/16096562/5359b4a5-f5ea-4565-8430-423700462fe0)
+
+4. Your voice is now streamed!
+
+5. Post command to let Cordtap leave the voice channel and stop streaming:
 
 ```
 /leave
