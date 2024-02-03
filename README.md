@@ -40,7 +40,7 @@ docker run TAG_NAME
 
 ![image](https://github.com/ruccho/cordtap/assets/16096562/5359b4a5-f5ea-4565-8430-423700462fe0)
 
-4. Your voice is now streamed!
+4. Cordtap joins the voice channel you are in and your voice is now streamed!
 
 5. Post command to let Cordtap leave the voice channel and stop streaming:
 
